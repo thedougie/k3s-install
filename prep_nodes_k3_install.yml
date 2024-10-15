@@ -1,0 +1,40 @@
+- hosts: all
+  gather_facts: false
+  tasks:
+
+    - name: Wait 600 seconds
+      ansible.builtin.wait_for_connection:
+      register: connected
+    - name: Install apt packages
+      become: true
+      ansible.builtin.apt:
+        name: "{{ item }}"
+        state: present
+      loop:
+        - git
+        - python3-kubernetes
+        - python3-yaml
+        - python3-jsonpatch
+
+# Below is needed if your workstation doesn't publish its fqdn on the local lan.  Some installs depending on what your running has this set to no.  
+
+    # - name: avahi change publish-workstation
+    #   ansible.builtin.replace:
+    #     path: /etc/avahi/avahi-daemon.conf
+    #     regexp: '^publish-workstation=no$'
+    #     replace: 'publish-workstation=yes'
+    #   when: connected is success
+    #   become: true
+# I dont use ipv6.  use as your own discretion.  
+    # - name: avahi change use-ipv6
+    #   ansible.builtin.replace:
+    #     path: /etc/avahi/avahi-daemon.conf
+    #     regexp: '^use-ipv6=yes$'
+    #     replace: 'use-ipv6=no'
+    #   when: connected is success
+    #   become: true
+
+    - name: Unconditionally reboot the machine with all defaults
+      ansible.builtin.reboot:
+      become: true
+      when: connected is success

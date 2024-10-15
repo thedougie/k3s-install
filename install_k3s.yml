@@ -1,0 +1,127 @@
+---
+- name: Install on master from script
+  hosts: master
+  become: true
+  tasks:
+    - name: Populate service facts
+      ansible.builtin.service_facts:
+    - name: Install K3s on master
+      ansible.builtin.shell: curl -sfL https://get.k3s.io | sh -s - --write-kubeconfig-mode 644 --disable servicelb --token {{ k3s_token }} --disable-cloud-controller --bind-address {{ ansible_default_ipv4.address }} --tls-san "turingnode1.thedougie.com,192.168.100.55"
+      register: k3s_master_install
+      when: ansible_facts.services['k3s.service'] is not defined
+
+- name: Install on worker from script
+  hosts: workers
+  become: true
+  vars:
+    k3s_url: "https://{{ hostvars['turingnode1.thedougie.com']['ansible_default_ipv4']['address'] }}:6443"
+  tasks:
+    - name: Populate service facts
+      ansible.builtin.service_facts:
+
+    - name: Install K3s on workers
+      ansible.builtin.shell: curl -sfL https://get.k3s.io | K3S_URL={{ k3s_url }} K3S_TOKEN={{ k3s_token }} sh -
+      when: ansible_facts.services['k3s-agent.service'] is not defined
+
+- name: Label K3s workers
+  hosts: master
+  become: true
+  gather_facts: false
+  tasks:
+    - name: Label K3s nodes as  workers
+      ansible.builtin.shell: kubectl label node {{ hostvars[item].ansible_nodename }} node-role.kubernetes.io/worker=worker
+      with_items: "{{ groups['workers'] }}"
+
+- name: Install Helm
+  hosts: master
+  become: true
+  gather_facts: false
+  tasks:
+    - name: Install Helm
+      ansible.builtin.shell: |
+        cd ~
+        mkdir helm  
+        cd helm 
+        curl -fsSL -o get_helm.sh https://raw.githubusercontent.com/helm/helm/master/scripts/get-helm-3
+        chmod 700 get_helm.sh
+        ./get_helm.sh
+      when: k3s_master_install.changed
+
+- name: Install MetalLB
+  hosts: master
+  become: true
+  gather_facts: false
+  tasks: 
+    - name: Add stable chart repo
+      kubernetes.core.helm_repository:
+        validate_certs: false
+        kubeconfig: /etc/rancher/k3s/k3s.yaml
+        #force_update: true
+        repo_name: metallb
+        repo_url: "https://metallb.github.io/metallb"
+        state: present
+      register: helm_repo_install
+      when: k3s_master_install.changed
+
+    - name: helm repo update
+      kubernetes.core.helm:
+        validate_certs: false
+        kubeconfig: /etc/rancher/k3s/k3s.yaml
+        state: absent
+        release_name: dummy # tricks needed to refresh in separate step
+        release_namespace: kube-system
+        update_repo_cache: true
+      when: helm_repo_install is defined
+
+    - name: Deploy MetalLB
+      kubernetes.core.helm:
+        validate_certs: false
+        kubeconfig: /etc/rancher/k3s/k3s.yaml
+        name: metallb
+        chart_ref: metallb/metallb
+        release_namespace: metallb-system
+        create_namespace: true
+        release_state: present
+        purge: true
+        force: true
+        wait: true
+      when:
+        - k3s_master_install.changed
+        - helm_repo_install is defined
+
+    - name: Set MetalLB config
+      kubernetes.core.k8s:
+        validate_certs: false
+        kubeconfig: /etc/rancher/k3s/k3s.yaml
+        state: present
+        definition:
+          apiVersion: metallb.io/v1beta1
+          kind: IPAddressPool
+          metadata:
+            name: first-pool
+            namespace: metallb-system
+          spec:
+            addresses:
+            - 192.168.100.151-192.168.100.155
+      register: metallb_config
+      when: 
+        - k3s_master_install.changed
+        - helm_repo_install is defined
+
+    - name: Set MetalLB L2Advertisement
+      kubernetes.core.k8s:
+        validate_certs: false
+        kubeconfig: /etc/rancher/k3s/k3s.yaml
+        state: present
+        definition:
+          apiVersion: metallb.io/v1beta1
+          kind: L2Advertisement
+          metadata:
+            name: first-pool
+            namespace: metallb-system
+          spec:
+            ipAddressPools:
+            - first-pool
+      when: 
+        - k3s_master_install.changed
+        - metallb_config is defined
